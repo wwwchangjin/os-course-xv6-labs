@@ -29,7 +29,7 @@ int main(int argc,char *argv[])
   close(c2p[0]);
 
   read(p2c[0],&buf,1);
-  printf("%d:received ping\n",getpid());
+  printf("%d: received ping\n",getpid());
   write(c2p[1],&buf,1);
 
   close(p2c[0]);
@@ -43,7 +43,7 @@ int main(int argc,char *argv[])
 
   write(p2c[1],&buf,1);
   read(c2p[0],&buf,1);
-  printf("%d:received pong\n",getpid());
+  printf("%d: received pong\n",getpid());
 
   close(c2p[0]);
   close(p2c[1]);
