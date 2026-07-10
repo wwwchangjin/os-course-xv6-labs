@@ -1,0 +1,26 @@
+1. The arguments to a function are passed in registers a0 through a7.
+   In the call to printf in main, 13 is stored in register a2.
+
+2. There is no instruction in main that calls f, and there is no
+   instruction in f that calls g. The compiler inlined the functions.
+   It directly computed f(8) + 1 as 12 and loaded 12 into a1.
+
+3. printf is located at address 0x630.
+
+4. After the jalr instruction at address 0x34 executes, ra contains
+   0x38, which is the address of the next instruction.
+
+5. The output is:
+   He110 World
+
+   57616 is 0xe110. Since RISC-V is little-endian, 0x00646c72 is
+   stored in memory as bytes 0x72, 0x6c, 0x64, 0x00, which represent
+   the string "rld".
+
+6. On a big-endian machine, i should be 0x726c6400 to produce the same
+   byte sequence in memory. 57616 does not need to change because
+   endianness does not change the numeric value printed by %x.
+
+7. The value printed after y= is indeterminate. The second integer
+   argument should be passed in a2, but no second integer was supplied,
+   so printf reads whatever value happens to remain in a2.
