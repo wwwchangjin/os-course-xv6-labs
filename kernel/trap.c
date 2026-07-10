@@ -78,7 +78,28 @@ usertrap(void)
 
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
+  {
+    // 只有启用了 alarm，并且 handler 当前没有在执行时，才累计 tick。
+    if(p->alarm_interval > 0 && p->alarm_active == 0){
+      p->alarm_ticks++;
+
+      if(p->alarm_ticks >= p->alarm_interval){
+        // 保存被时钟中断时的全部用户寄存器。
+        memmove(&p->alarm_tf,
+                p->trapframe,
+                sizeof(struct trapframe));
+
+        // 重新计时，并标记 handler 正在执行。
+        p->alarm_ticks = 0;
+        p->alarm_active = 1;
+
+        // 返回用户态后从 alarm handler 开始执行。
+        p->trapframe->epc = p->alarm_handler;
+      }
+    }
+
     yield();
+  }
 
   usertrapret();
 }
