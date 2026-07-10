@@ -1,0 +1,31 @@
+1. Which other xv6 system call(s) could be made faster using the shared page? Explain how.
+
+The uptime() system call could also be accelerated using a shared read-only
+page. The kernel could maintain the current tick count in a physical page
+that is mapped read-only into each process's user page table. A user-space
+function could then read the tick count directly without entering the kernel
+through a system call. The kernel would remain responsible for updating the
+value, while user programs would only have read permission.
+
+
+2. Explain the output of vmprint in terms of Figure 3-4. What does page 0
+contain? What is in page 2? When running in user mode, could the process
+read/write the memory mapped by page 1? What does the third-to-last page
+contain?
+
+vmprint displays the three-level Sv39 page-table tree. Entries with no
+PTE_R, PTE_W, or PTE_X permission bits point to lower-level page-table
+pages, while leaf entries describe mappings from virtual pages to physical
+pages.
+
+Virtual page 0 contains the init process's executable code and data.
+
+Virtual page 1 is the guard page placed below the user stack. Its PTE_U bit
+is cleared, so code running in user mode cannot read or write this page.
+Accessing it from user mode causes a page fault.
+
+Virtual page 2 contains the initial user stack.
+
+The third-to-last virtual page is USYSCALL. It contains a struct usyscall
+whose pid field stores the process ID. The page is mapped with PTE_R and
+PTE_U, so user code can read it but cannot write it.
