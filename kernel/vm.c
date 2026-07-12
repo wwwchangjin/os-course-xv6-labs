@@ -291,6 +291,55 @@ uvmfree(pagetable_t pagetable, uint64 sz)
   freewalk(pagetable);
 }
 
+// Handle a write fault on a copy-on-write page.
+// Return 0 on success, -1 on failure.
+int
+cowalloc(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+  uint64 pa;
+  uint64 flags;
+  char *mem;
+
+  va = PGROUNDDOWN(va);
+
+  if(va >= MAXVA)
+    return -1;
+
+  pte = walk(pagetable, va, 0);
+
+  if(pte == 0)
+    return -1;
+
+  if((*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+    return -1;
+
+  if((*pte & PTE_COW) == 0)
+    return -1;
+
+  pa = PTE2PA(*pte);
+  flags = PTE_FLAGS(*pte);
+
+  if(krefcnt(pa) == 1){
+    flags = (flags | PTE_W) & ~PTE_COW;
+    *pte = PA2PTE(pa) | flags;
+    return 0;
+  }
+
+  mem = kalloc();
+  if(mem == 0)
+    return -1;
+
+  memmove(mem, (char*)pa, PGSIZE);
+
+  flags = (flags | PTE_W) & ~PTE_COW;
+  *pte = PA2PTE((uint64)mem) | flags;
+
+  kfree((void*)pa);
+
+  return 0;
+}
+
 // Given a parent process's page table, copy
 // its memory into a child's page table.
 // Copies both the page table and the
@@ -303,26 +352,32 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
+
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
+
+    if(flags & PTE_W){
+      flags = (flags & ~PTE_W) | PTE_COW;
+
+      *pte = PA2PTE(pa) | flags;
     }
+
+    if(mappages(new, i, PGSIZE, pa, flags) != 0)
+      goto err;
+
+    krefinc(pa);
   }
+
   return 0;
 
- err:
+err:
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
 }
@@ -347,21 +402,41 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t *pte;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+
+    if(va0 >= MAXVA)
+      return -1;
+
+    pte = walk(pagetable, va0, 0);
+    if(pte == 0)
+      return -1;
+
+    if((*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+      return -1;
+
+    if(*pte & PTE_COW){
+      if(cowalloc(pagetable, va0) < 0)
+        return -1;
+    }
+
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
+
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
+
     memmove((void *)(pa0 + (dstva - va0)), src, n);
 
     len -= n;
     src += n;
     dstva = va0 + PGSIZE;
   }
+
   return 0;
 }
 
