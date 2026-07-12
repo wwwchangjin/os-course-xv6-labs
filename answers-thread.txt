@@ -1,0 +1,13 @@
+When two threads insert keys into the same hash bucket concurrently,
+both threads may read the same old bucket head before either thread
+updates it.
+
+For example, suppose the old head is H. Thread 0 creates entry A and
+sets A->next to H. At the same time, thread 1 creates entry B and sets
+B->next to H. Thread 0 then changes the bucket head to A, but thread 1
+later changes the same bucket head to B. The update made by thread 0 is
+overwritten, so entry A is no longer reachable from the bucket.
+
+This race does not occur with one thread because the read and update
+operations cannot overlap with another put operation. A mutex is needed
+to make updates to the same bucket mutually exclusive.
