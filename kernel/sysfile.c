@@ -309,6 +309,39 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
+    if(!(omode & O_NOFOLLOW)){
+      int depth = 0;
+
+      while(ip->type == T_SYMLINK){
+        char target[MAXPATH];
+
+      // 防止符号链接形成循环
+        if(depth++ >= 10){
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+
+      // 读取符号链接中保存的目标路径
+        if(readi(ip, 0, (uint64)target, 0, MAXPATH) <= 0){
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+
+      // 释放当前符号链接 inode
+        iunlockput(ip);
+
+      // 查找目标路径
+        if((ip = namei(target)) == 0){
+          end_op();
+          return -1;
+        }
+
+        ilock(ip);
+      }
+    }
+
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
@@ -482,5 +515,42 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH];
+  char path[MAXPATH];
+  struct inode *ip;
+  int len;
+
+  // 获取用户传入的目标路径和符号链接路径
+  if(argstr(0, target, MAXPATH) < 0 ||
+     argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+
+  // 创建一个类型为 T_SYMLINK 的 inode
+  ip = create(path, T_SYMLINK, 0, 0);
+  if(ip == 0){
+    end_op();
+    return -1;
+  }
+
+  // 将目标路径，包括字符串结尾的 '\0'，保存到 inode 数据块中
+  len = strlen(target) + 1;
+
+  if(writei(ip, 0, (uint64)target, 0, len) != len){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
+
   return 0;
 }
