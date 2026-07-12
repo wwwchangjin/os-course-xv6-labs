@@ -374,29 +374,80 @@ iunlockput(struct inode *ip)
 
 // Return the disk block address of the nth block in inode ip.
 // If there is no such block, bmap allocates one.
+
 static uint
 bmap(struct inode *ip, uint bn)
 {
   uint addr, *a;
   struct buf *bp;
 
+  // 直接块
   if(bn < NDIRECT){
-    if((addr = ip->addrs[bn]) == 0)
-      ip->addrs[bn] = addr = balloc(ip->dev);
+    if((addr = ip->addrs[bn]) == 0){
+      addr = balloc(ip->dev);
+      ip->addrs[bn] = addr;
+    }
     return addr;
   }
+
   bn -= NDIRECT;
 
+  // 一级间接块
   if(bn < NINDIRECT){
-    // Load indirect block, allocating if necessary.
-    if((addr = ip->addrs[NDIRECT]) == 0)
-      ip->addrs[NDIRECT] = addr = balloc(ip->dev);
+    if((addr = ip->addrs[NDIRECT]) == 0){
+      addr = balloc(ip->dev);
+      ip->addrs[NDIRECT] = addr;
+    }
+
     bp = bread(ip->dev, addr);
     a = (uint*)bp->data;
+
     if((addr = a[bn]) == 0){
-      a[bn] = addr = balloc(ip->dev);
+      addr = balloc(ip->dev);
+      a[bn] = addr;
       log_write(bp);
     }
+
+    brelse(bp);
+    return addr;
+  }
+
+  bn -= NINDIRECT;
+
+  // 二级间接块
+  if(bn < NDINDIRECT){
+    // 分配二级间接块本身
+    if((addr = ip->addrs[NDIRECT + 1]) == 0){
+      addr = balloc(ip->dev);
+      ip->addrs[NDIRECT + 1] = addr;
+    }
+
+    // 二级间接块中存放一级间接块的地址
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+
+    uint first_index = bn / NINDIRECT;
+
+    if((addr = a[first_index]) == 0){
+      addr = balloc(ip->dev);
+      a[first_index] = addr;
+      log_write(bp);
+    }
+
+    brelse(bp);
+
+    // 读取对应的一级间接块
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+
+    uint second_index = bn % NINDIRECT;
+
+    if((addr = a[second_index]) == 0){
+      addr = balloc(ip->dev);
+      a[second_index] = addr;
+      log_write(bp);
+    }
+
     brelse(bp);
     return addr;
   }
@@ -409,10 +460,13 @@ bmap(struct inode *ip, uint bn)
 void
 itrunc(struct inode *ip)
 {
-  int i, j;
+  int i, j, k;
   struct buf *bp;
+  struct buf *bp2;
   uint *a;
+  uint *a2;
 
+  // 释放直接块
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
       bfree(ip->dev, ip->addrs[i]);
@@ -420,16 +474,50 @@ itrunc(struct inode *ip)
     }
   }
 
+  // 释放一级间接块中的数据块
   if(ip->addrs[NDIRECT]){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
+
     for(j = 0; j < NINDIRECT; j++){
       if(a[j])
         bfree(ip->dev, a[j]);
     }
+
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  // 释放二级间接块
+  if(ip->addrs[NDIRECT + 1]){
+    bp = bread(ip->dev, ip->addrs[NDIRECT + 1]);
+    a = (uint*)bp->data;
+
+    for(j = 0; j < NINDIRECT; j++){
+      if(a[j]){
+        // a[j] 指向一个一级间接块
+        bp2 = bread(ip->dev, a[j]);
+        a2 = (uint*)bp2->data;
+
+        // 释放该一级间接块指向的数据块
+        for(k = 0; k < NINDIRECT; k++){
+          if(a2[k])
+            bfree(ip->dev, a2[k]);
+        }
+
+        brelse(bp2);
+
+        // 释放一级间接块本身
+        bfree(ip->dev, a[j]);
+      }
+    }
+
+    brelse(bp);
+
+    // 释放二级间接块本身
+    bfree(ip->dev, ip->addrs[NDIRECT + 1]);
+    ip->addrs[NDIRECT + 1] = 0;
   }
 
   ip->size = 0;
