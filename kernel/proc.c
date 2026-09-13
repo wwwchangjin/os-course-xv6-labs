@@ -120,6 +120,9 @@ found:
   p->pid = allocpid();
   p->state = USED;
 
+    memset(p->vmas, 0, sizeof(p->vmas));
+    p->mmap_top = TRAPFRAME;
+
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     freeproc(p);
@@ -157,6 +160,10 @@ freeproc(struct proc *p)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
   p->sz = 0;
+
+  memset(p->vmas, 0, sizeof(p->vmas));
+  p->mmap_top = TRAPFRAME;
+
   p->pid = 0;
   p->parent = 0;
   p->name[0] = 0;
@@ -295,6 +302,16 @@ fork(void)
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
 
+  // Copy mmap regions from parent to child.
+  np->mmap_top = p->mmap_top;
+
+  for(i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      np->vmas[i] = p->vmas[i];
+
+      np->vmas[i].file = filedup(p->vmas[i].file);
+    } 
+  }
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
@@ -343,6 +360,14 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      vmaunmap(p,
+               p->vmas[i].addr,
+               p->vmas[i].length);
+    }
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){

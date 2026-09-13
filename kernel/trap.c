@@ -3,6 +3,10 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
+#include "fcntl.h"
 #include "proc.h"
 #include "defs.h"
 
@@ -27,6 +31,77 @@ void
 trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
+}
+
+static int
+mmapfault(struct proc *p, uint64 faultva)
+{
+  struct vma *v = 0;
+
+  // 查找包含缺页地址的 VMA
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used &&
+       faultva >= p->vmas[i].addr &&
+       faultva < p->vmas[i].addr + p->vmas[i].length){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+
+  // 缺页地址不属于任何 mmap 区域
+  if(v == 0)
+    return -1;
+
+  uint64 va = PGROUNDDOWN(faultva);
+
+  /*
+   * 如果该虚拟页已经映射，说明不是“页面尚未加载”，
+   * 而可能是向只读页面写入等权限错误。
+   */
+  if(walkaddr(p->pagetable, va) != 0)
+    return -1;
+
+  char *mem = kalloc();
+  if(mem == 0)
+    return -1;
+
+  // 文件不足一页时，剩余部分应保持为 0
+  memset(mem, 0, PGSIZE);
+
+  // 计算当前页面对应的文件偏移
+  uint64 fileoff = v->offset + (va - v->addr);
+
+  // readi 要求调用者持有 inode 锁
+  ilock(v->file->ip);
+  int n = readi(v->file->ip, 0, (uint64)mem,
+                (uint)fileoff, PGSIZE);
+  iunlock(v->file->ip);
+
+  if(n < 0){
+    kfree(mem);
+    return -1;
+  }
+
+  // 根据 mmap 的 prot 设置页表权限
+  int perm = PTE_U;
+
+  if(v->prot & PROT_READ)
+    perm |= PTE_R;
+
+  /*
+   * RISC-V 的可写叶子页通常同时需要可读权限，
+   * 因此设置 PTE_W 时也加上 PTE_R。
+   */
+  if(v->prot & PROT_WRITE)
+    perm |= PTE_R | PTE_W;
+
+  if(mappages(p->pagetable, va, PGSIZE,
+              (uint64)mem, perm) != 0){
+    kfree(mem);
+    return -1;
+  }
+
+  return 0;
 }
 
 //
@@ -65,6 +140,9 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 13 || r_scause() == 15){
+    if(mmapfault(p, r_stval()) < 0)
+      p->killed = 1;
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

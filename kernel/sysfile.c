@@ -484,3 +484,220 @@ sys_pipe(void)
   }
   return 0;
 }
+
+// 将一个 mmap 页面的内容写回文件。
+// va 是该页面的用户虚拟地址，pa 是对应物理页地址。
+static int
+mmapwrite(struct vma *v, uint64 va, uint64 pa, uint64 n)
+{
+  uint64 done = 0;
+
+  /*
+   * 仿照 filewrite() 分块写入，避免一次日志事务写入
+   * 过多磁盘块。
+   */
+  int max = ((MAXOPBLOCKS - 1 - 1 - 2) / 2) * BSIZE;
+
+  while(done < n){
+    int n1 = n - done;
+    if(n1 > max)
+      n1 = max;
+
+    begin_op();
+
+    ilock(v->file->ip);
+
+    int r = writei(
+      v->file->ip,
+      0,                         // 数据来源是内核地址
+      pa + done,
+      v->offset + (va - v->addr) + done,
+      n1
+    );
+
+    iunlock(v->file->ip);
+
+    end_op();
+
+    if(r != n1)
+      return -1;
+
+    done += r;
+  }
+
+  return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  int length;
+  int prot;
+  int flags;
+  int offset;
+  struct file *f;
+  struct proc *p = myproc();
+  struct vma *v = 0;
+
+  // mmap(addr, length, prot, flags, fd, offset)
+  argaddr(0, &addr);
+  argint(1, &length);
+  argint(2, &prot);
+  argint(3, &flags);
+
+  if(argfd(4, 0, &f) < 0)
+    return -1;
+
+  argint(5, &offset);
+
+  // 本实验只需要支持 addr == 0、offset == 0
+  if(addr != 0 || length <= 0 || offset != 0)
+    return -1;
+
+  // mmaptest 映射的是普通文件，并且需要读取文件内容
+  if(f->type != FD_INODE || f->readable == 0)
+    return -1;
+
+  if(flags != MAP_SHARED && flags != MAP_PRIVATE)
+    return -1;
+
+  /*
+   * MAP_SHARED 且允许写入时，底层文件必须以可写方式打开。
+   * MAP_PRIVATE 的修改不写回文件，因此可以映射只读文件。
+   */
+  if((prot & PROT_WRITE) &&
+     flags == MAP_SHARED &&
+     f->writable == 0)
+    return -1;
+
+  // 查找空闲 VMA
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used == 0){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+
+  if(v == 0)
+    return -1;
+
+  uint64 maplen = PGROUNDUP((uint64)length);
+
+  if(maplen == 0 || p->mmap_top < maplen)
+    return -1;
+
+  // 从高地址向低地址分配
+  uint64 mapaddr = p->mmap_top - maplen;
+
+  // 防止 mmap 区域与普通用户内存重叠
+  if(mapaddr < PGROUNDUP(p->sz))
+    return -1;
+
+  v->used = 1;
+  v->addr = mapaddr;
+  v->length = maplen;
+  v->prot = prot;
+  v->flags = flags;
+  v->file = filedup(f);
+  v->offset = offset;
+
+  p->mmap_top = mapaddr;
+
+  return mapaddr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int length;
+
+  argaddr(0, &addr);
+  argint(1, &length);
+
+  if(length <= 0)
+    return -1;
+
+  return vmaunmap(myproc(), addr, (uint64)length);
+}
+
+int
+vmaunmap(struct proc *p, uint64 addr, uint64 length)
+{
+  struct vma *v = 0;
+
+  if(length == 0)
+    return -1;
+
+  if(addr % PGSIZE != 0)
+    return -1;
+
+  uint64 len = PGROUNDUP(length);
+  uint64 end = addr + len;
+
+  if(end < addr)
+    return -1;
+
+  // 找到完整包含该解除区间的 VMA。
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used == 0)
+      continue;
+
+    uint64 vend = p->vmas[i].addr + p->vmas[i].length;
+
+    if(addr >= p->vmas[i].addr && end <= vend){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+
+  if(v == 0)
+    return -1;
+
+  uint64 oldaddr = v->addr;
+  uint64 oldend = v->addr + v->length;
+  int error = 0;
+
+  /*
+   * 本实验保证解除的是 VMA 开头、末尾或整个 VMA，
+   * 不需要支持在中间打洞。
+   */
+  if(addr != oldaddr && end != oldend)
+    return -1;
+
+  for(uint64 a = addr; a < end; a += PGSIZE){
+    uint64 pa = walkaddr(p->pagetable, a);
+
+    if(pa == 0)
+      continue;
+
+    if(v->flags == MAP_SHARED && (v->prot & PROT_WRITE)){
+      uint64 n = PGSIZE;
+
+      if(a + n > oldend)
+        n = oldend - a;
+
+      if(mmapwrite(v, a, pa, n) < 0)
+        error = -1;
+    }
+
+    uvmunmap(p->pagetable, a, 1, 1);
+  }
+
+  if(addr == oldaddr && end == oldend){
+    // 整个 VMA 被解除。
+    fileclose(v->file);
+    memset(v, 0, sizeof(*v));
+  } else if(addr == oldaddr){
+    // 解除 VMA 开头。
+    v->addr += len;
+    v->length -= len;
+    v->offset += len;
+  } else {
+    // 解除 VMA 末尾。
+    v->length -= len;
+  }
+
+  return error;
+}

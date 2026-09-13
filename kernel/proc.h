@@ -82,6 +82,18 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+#define NVMA 16
+
+struct vma {
+  int used;             // 该 VMA 是否正在使用
+  uint64 addr;          // 映射区域起始虚拟地址
+  uint64 length;        // 映射区域长度，按页对齐
+  int prot;             // PROT_READ、PROT_WRITE
+  int flags;            // MAP_SHARED、MAP_PRIVATE
+  struct file *file;    // 被映射的文件
+  uint64 offset;        // 文件中的起始偏移
+};
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -102,6 +114,10 @@ struct proc {
   pagetable_t pagetable;       // User page table
   struct trapframe *trapframe; // data page for trampoline.S
   struct context context;      // swtch() here to run process
+
+  struct vma vmas[NVMA];
+  uint64 mmap_top;
+
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
